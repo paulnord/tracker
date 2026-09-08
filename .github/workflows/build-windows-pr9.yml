@@ -20,19 +20,57 @@ jobs:
           ref: improve-curve-fit-reports
           path: osp-pr9
 
-      - name: Set up Java 17
+      - name: Set up Java 17 build tools
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
 
-      - name: Build Tracker jar with OSP PR9 and Tracker PR74 classes
+      - name: Install official Tracker 6.3.5 Windows runtime
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          New-Item -ItemType Directory -Force build/classes, build/input, build/launcher, build/launcher-classes | Out-Null
+          New-Item -ItemType Directory -Force build | Out-Null
+          $installer = Join-Path $PWD 'build/Tracker-6.3.5-windows-x64-installer.exe'
+          $url = 'https://physlets.org/tracker/installers/download.php?file=Tracker-6.3.5-windows-x64-installer.exe'
+          & curl.exe -L --fail --retry 4 --retry-delay 3 -o $installer $url
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-          $cp = 'distribution/tracker.jar;libraries/xuggle-xuggler-w64.jar'
+          $p = Start-Process -FilePath $installer -ArgumentList '--mode','unattended','--unattendedmodeui','none' -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "Tracker installer exited with code $($p.ExitCode)" }
+
+          $trackerHome = Join-Path $env:ProgramFiles 'Tracker'
+          if (-not (Test-Path $trackerHome)) {
+            $trackerHome = Get-ChildItem $env:ProgramFiles -Directory -Recurse -ErrorAction SilentlyContinue |
+              Where-Object { Test-Path (Join-Path $_.FullName 'Tracker.exe') } |
+              Select-Object -First 1 -ExpandProperty FullName
+          }
+          if (-not $trackerHome -or -not (Test-Path $trackerHome)) { throw 'Could not locate installed Tracker directory' }
+
+          $trackerJar = Get-ChildItem $trackerHome -Filter 'tracker.jar' -File -Recurse | Select-Object -First 1 -ExpandProperty FullName
+          $trackerExe = Get-ChildItem $trackerHome -Filter 'Tracker.exe' -File -Recurse | Select-Object -First 1 -ExpandProperty FullName
+          if (-not $trackerJar) { throw 'Could not locate tracker.jar in official installation' }
+          if (-not $trackerExe) { throw 'Could not locate Tracker.exe in official installation' }
+
+          "TRACKER_HOME=$trackerHome" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "TRACKER_JAR=$trackerJar" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "TRACKER_EXE=$trackerExe" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+          Write-Host "Tracker home: $trackerHome"
+          Write-Host "Tracker jar:  $trackerJar"
+          Write-Host "Tracker exe:  $trackerExe"
+          Get-ChildItem $trackerHome -Depth 2 | Select-Object FullName, Length
+
+      - name: Compile and overlay OSP PR9 and Tracker PR74
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force build/classes | Out-Null
+
+          $jarFiles = Get-ChildItem $env:TRACKER_HOME -Filter '*.jar' -File -Recurse | Select-Object -ExpandProperty FullName
+          $cp = ($jarFiles -join ';')
+          if (-not $cp) { throw 'No jars found in official Tracker installation' }
+
           $sources = @(
             'osp-pr9/src/org/opensourcephysics/display/DataTable.java',
             'osp-pr9/src/org/opensourcephysics/display/ExportText.java',
@@ -42,81 +80,65 @@ jobs:
             'osp-pr9/src/org/opensourcephysics/tools/DatasetCurveFitter.java',
             'osp-pr9/src/org/opensourcephysics/tools/FitMetadataProvider.java',
             'osp-pr9/src/org/opensourcephysics/tools/FitUncertainty.java',
-            'src/org/opensourcephysics/cabrillo/tracker/Tracker.java',
             'src/org/opensourcephysics/cabrillo/tracker/FitDataMetadata.java',
             'src/org/opensourcephysics/cabrillo/tracker/TableTrackView.java',
             'src/org/opensourcephysics/cabrillo/tracker/TrackPlottingPanel.java',
             'src/org/opensourcephysics/cabrillo/tracker/TrackerPanel.java'
           )
 
-          & javac -encoding UTF-8 -cp $cp -sourcepath 'src;osp-pr9/src' -d build/classes $sources
+          & javac -encoding UTF-8 -cp $cp -d build/classes $sources
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
           $resourceDir = 'build/classes/org/opensourcephysics/resources/tools'
           New-Item -ItemType Directory -Force $resourceDir | Out-Null
           Copy-Item 'osp-pr9/src/org/opensourcephysics/resources/tools/tools.properties' "$resourceDir/tools.properties"
 
-          Copy-Item 'distribution/tracker.jar' 'build/input/tracker.jar'
-          & jar --update --file 'build/input/tracker.jar' -C 'build/classes' .
+          $signatureEntries = & jar tf $env:TRACKER_JAR | Select-String -Pattern '^META-INF/.*\.(SF|RSA|DSA)$'
+          if ($signatureEntries) { throw "tracker.jar is signed; refusing to invalidate signatures: $signatureEntries" }
+
+          Copy-Item $env:TRACKER_JAR "$env:TRACKER_JAR.before-pr9" -Force
+          & jar --update --file $env:TRACKER_JAR -C build/classes .
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-          Copy-Item 'distribution/tracker-assets.zip' 'build/input/tracker-assets.zip'
-          Copy-Item 'libraries/xuggle-xuggler-w64.jar' 'build/input/xuggle-xuggler-w64.jar'
-
-          @'
-          package org.opensourcephysics.cabrillo.tracker;
-
-          public final class TrackerPR9Launcher {
-            private TrackerPR9Launcher() {}
-
-            public static void main(String[] args) {
-              javax.swing.SwingUtilities.invokeLater(() -> new Tracker());
-            }
-          }
-          '@ | Set-Content -Encoding UTF8 'build/launcher/TrackerPR9Launcher.java'
-
-          & javac -encoding UTF-8 -cp 'build/input/tracker.jar' -d 'build/launcher-classes' 'build/launcher/TrackerPR9Launcher.java'
+          & javap -classpath $env:TRACKER_JAR org.opensourcephysics.tools.CurveFitReport | Out-Null
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & javap -classpath $env:TRACKER_JAR org.opensourcephysics.tools.FitMetadataProvider | Out-Null
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & javap -classpath $env:TRACKER_JAR org.opensourcephysics.cabrillo.tracker.FitDataMetadata | Out-Null
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-          & jar --create --file 'build/input/tracker-pr9-launcher.jar' --main-class 'org.opensourcephysics.cabrillo.tracker.TrackerPR9Launcher' -C 'build/launcher-classes' .
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Remove-Item "$env:TRACKER_JAR.before-pr9" -Force
 
-          & javap -classpath 'build/input/tracker.jar' org.opensourcephysics.tools.CurveFitReport | Out-Null
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          & javap -classpath 'build/input/tracker.jar' org.opensourcephysics.tools.FitMetadataProvider | Out-Null
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          & javap -classpath 'build/input/tracker.jar' org.opensourcephysics.cabrillo.tracker.FitDataMetadata | Out-Null
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
-      - name: Package self-contained Windows application
+      - name: Assemble portable Windows test build
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           New-Item -ItemType Directory -Force build/package | Out-Null
-          & jpackage `
-            --type app-image `
-            --name 'Tracker-PR9' `
-            --input 'build/input' `
-            --main-jar 'tracker-pr9-launcher.jar' `
-            --main-class 'org.opensourcephysics.cabrillo.tracker.TrackerPR9Launcher' `
-            --dest 'build/package' `
-            --java-options '-Xmx2048m'
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $dest = Join-Path $PWD 'build/package/Tracker-PR9'
+          Copy-Item $env:TRACKER_HOME $dest -Recurse -Force
 
-          Copy-Item 'LICENSE' 'build/package/Tracker-PR9/LICENSE.txt'
-          @'
+          $ospSha = (& git -C osp-pr9 rev-parse HEAD).Trim()
+          $trackerSha = (& git rev-parse HEAD).Trim()
+          @"
           Tracker PR9 Windows test build
 
-          Contents:
-          - Tracker branch: paulnord/tracker windows-pr9-build, based on improve-fit-physics-metadata (Tracker PR #74)
-          - OSP branch: paulnord/osp improve-curve-fit-reports (OSP PR #9)
-          - Bundled Java runtime: Temurin/OpenJDK 17 via jpackage
-          - Bundled Windows Xuggle jar: xuggle-xuggler-w64.jar
+          This is the official Tracker 6.3.5 Windows runtime with its bundled Java VM,
+          Xuggle video engine, launcher and support files. Its tracker.jar has been
+          overlaid with the current OSP PR #9 curve-fit changes and Tracker PR #74
+          fit-metadata adapter changes.
 
-          Run Tracker-PR9.exe. This is an unsigned development/test build, so Windows SmartScreen may warn before first launch.
-          '@ | Set-Content -Encoding UTF8 'build/package/Tracker-PR9/README-PR9.txt'
+          Tracker packaging branch commit: $trackerSha
+          OSP PR9 branch commit: $ospSha
 
-          Compress-Archive -Path 'build/package/Tracker-PR9' -DestinationPath 'build/Tracker-PR9-Windows-x64.zip' -Force
+          Launch: Tracker.exe
+
+          This is a development/test build, not an official Open Source Physics release.
+          The native Tracker.exe comes from the official 6.3.5 Windows distribution;
+          the Java application jar inside this directory contains the experimental changes.
+          "@ | Set-Content -Encoding UTF8 (Join-Path $dest 'README-PR9.txt')
+
+          if (-not (Get-ChildItem $dest -Filter 'Tracker.exe' -File -Recurse)) { throw 'Portable package is missing Tracker.exe' }
+          Compress-Archive -Path $dest -DestinationPath 'build/Tracker-PR9-Windows-x64.zip' -Force
 
       - name: Upload Windows portable build
         uses: actions/upload-artifact@v4
