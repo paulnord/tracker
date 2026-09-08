@@ -42,13 +42,14 @@ jobs:
             'osp-pr9/src/org/opensourcephysics/tools/DatasetCurveFitter.java',
             'osp-pr9/src/org/opensourcephysics/tools/FitMetadataProvider.java',
             'osp-pr9/src/org/opensourcephysics/tools/FitUncertainty.java',
+            'src/org/opensourcephysics/cabrillo/tracker/Tracker.java',
             'src/org/opensourcephysics/cabrillo/tracker/FitDataMetadata.java',
             'src/org/opensourcephysics/cabrillo/tracker/TableTrackView.java',
             'src/org/opensourcephysics/cabrillo/tracker/TrackPlottingPanel.java',
             'src/org/opensourcephysics/cabrillo/tracker/TrackerPanel.java'
           )
 
-          & javac -encoding UTF-8 -cp $cp -d build/classes $sources
+          & javac -encoding UTF-8 -cp $cp -sourcepath 'src;osp-pr9/src' -d build/classes $sources
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
           $resourceDir = 'build/classes/org/opensourcephysics/resources/tools'
