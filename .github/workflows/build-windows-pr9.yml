@@ -32,7 +32,7 @@ jobs:
           $ErrorActionPreference = 'Stop'
           New-Item -ItemType Directory -Force build | Out-Null
           $installer = Join-Path $PWD 'build/Tracker-6.3.5-windows-x64-installer.exe'
-          $url = 'https://physlets.org/tracker/installers/download.php?file=Tracker-6.3.5-windows-x64-installer.exe'
+          $url = 'https://www.compadre.org/osp/images/tracker/Tracker-6.3.5-windows-x64-installer.exe'
           & curl.exe -L --fail --retry 4 --retry-delay 3 -o $installer $url
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
